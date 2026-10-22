@@ -32,15 +32,49 @@ const INITIAL_GOALS = [
   { id: 'g3', title: 'Semester End Trip to Goa', target: 20000, current: 6500, deadline: '2027-01-20' },
 ];
 
-const BURNDOWN_DATA = [
-  { day: 'Day 1', ideal: 12000, actual: 12000 },
-  { day: 'Day 3', ideal: 10280, actual: 11500 },
-  { day: 'Day 5', ideal: 8570, actual: 9800 },
-  { day: 'Day 7', ideal: 6850, actual: 7400 },
-  { day: 'Day 10', ideal: 4280, actual: 6100 },
-  { day: 'Day 12', ideal: 2570, actual: 8100 },
-  { day: 'Day 14', ideal: 0, actual: 9230 },
-];
+const SPRINT_DURATION_DAYS = 14;
+const BURNDOWN_CHECKPOINT_DAYS = [1, 3, 5, 7, 10, 12, 14];
+
+function buildBurndownData({ budget, spent, transactions, sprintName }) {
+  const sprintNumber = sprintName.match(/^Sprint \d+\b/)?.[0];
+  const belongsToSprint = tx => sprintNumber
+    ? tx.sprint.match(/^Sprint \d+\b/)?.[0] === sprintNumber
+    : tx.sprint === sprintName;
+  const expenses = transactions
+    .filter(tx => tx.type === 'expense' && belongsToSprint(tx))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const sprintTransactions = transactions
+    .filter(belongsToSprint)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const ledgerTotal = expenses.reduce((sum, tx) => sum + tx.amount, 0);
+  const sprintStart = sprintTransactions.length ? new Date(`${sprintTransactions[0].date}T00:00:00Z`) : null;
+  const spentByDay = Array(SPRINT_DURATION_DAYS + 1).fill(0);
+
+  expenses.forEach(tx => {
+    const txDate = new Date(`${tx.date}T00:00:00Z`);
+    const elapsedDays = sprintStart
+      ? Math.floor((txDate.getTime() - sprintStart.getTime()) / 86400000) + 1
+      : SPRINT_DURATION_DAYS;
+    const day = Math.max(1, Math.min(SPRINT_DURATION_DAYS, elapsedDays));
+    spentByDay[day] += tx.amount;
+  });
+
+  const ledgerScale = ledgerTotal > 0 ? spent / ledgerTotal : 0;
+  let cumulativeLedgerSpend = 0;
+  return BURNDOWN_CHECKPOINT_DAYS.map(dayNumber => {
+    for (let day = dayNumber === 1 ? 1 : BURNDOWN_CHECKPOINT_DAYS[BURNDOWN_CHECKPOINT_DAYS.indexOf(dayNumber) - 1] + 1; day <= dayNumber; day += 1) {
+      cumulativeLedgerSpend += spentByDay[day];
+    }
+
+    const progress = dayNumber / SPRINT_DURATION_DAYS;
+    const cumulativeSpend = ledgerTotal > 0 ? cumulativeLedgerSpend * ledgerScale : spent * progress;
+    return {
+      day: `Day ${dayNumber}`,
+      ideal: Math.round(budget * (1 - progress)),
+      actual: Math.round(budget - cumulativeSpend),
+    };
+  });
+}
 
 const CATEGORY_COLORS = {
   'Food & Rent': '#6366f1',
@@ -61,6 +95,8 @@ function App() {
   
   // Modal & Form States
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isSprintSetupOpen, setIsSprintSetupOpen] = useState(true);
+  const [sprintSetup, setSprintSetup] = useState({ spent: '9230', budget: '12000' });
   const [newTx, setNewTx] = useState({ title: '', amount: '', type: 'expense', category: 'Food & Rent' });
 
   // Supabase mock connection state
@@ -86,6 +122,13 @@ function App() {
     });
     return Object.keys(map).map(cat => ({ name: cat, value: map[cat] }));
   }, [transactions]);
+
+  const burndownData = useMemo(() => buildBurndownData({
+    budget: activeSprint.budget,
+    spent: activeSprint.spent,
+    transactions,
+    sprintName: activeSprint.name,
+  }), [activeSprint.budget, activeSprint.spent, activeSprint.name, transactions]);
 
   const handleAddTransaction = (e) => {
     e.preventDefault();
@@ -124,6 +167,15 @@ function App() {
       { id: Date.now(), time: 'Just now', action: `Deleted transaction ID: ${id}`, status: 'warning' },
       ...syncLogs
     ]);
+  };
+
+  const handleSprintSetup = (e) => {
+    e.preventDefault();
+    const spent = Number(sprintSetup.spent);
+    const budget = Number(sprintSetup.budget);
+    if (!Number.isFinite(spent) || !Number.isFinite(budget) || spent < 0 || budget <= 0) return;
+    setSprints(current => current.map(s => s.status === 'Active' ? { ...s, spent, budget } : s));
+    setIsSprintSetupOpen(false);
   };
 
   return (
@@ -174,7 +226,7 @@ function App() {
       <div className="md:hidden flex overflow-x-auto bg-slate-900 border-b border-slate-800 px-2 py-2 space-x-2">
         <MobileNavTab active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} label="Dashboard" />
         <MobileNavTab active={activeTab === 'transactions'} onClick={() => setActiveTab('transactions')} label="Transactions" />
-        <MobileNavTab active={activeTab === 'sprints'} onClick={() => setActiveTab('sprints')} label="Sprints" />
+        <MobileNavTab active={activeTab === 'sprints'} onClick={() => setActiveTab('sprints')} label="Sprint & Burndown" />
         <MobileNavTab active={activeTab === 'goals'} onClick={() => setActiveTab('goals')} label="Goals" />
         <MobileNavTab active={activeTab === 'database'} onClick={() => setActiveTab('database')} label="Database" />
       </div>
@@ -185,6 +237,15 @@ function App() {
         {/* TAB 1: DASHBOARD */}
         {activeTab === 'dashboard' && (
           <div className="space-y-8 animate-fadeIn">
+            <section className="dashboard-intro">
+              <div className="dashboard-intro-copy">
+                <div className="dashboard-eyebrow"><span className="dashboard-eyebrow-dot" /> YOUR MONEY, IN MOTION <span className="dashboard-eyebrow-line" /></div>
+                <h1>Make every rupee<br /><em>move you forward.</em></h1>
+                <p>Your student finance snapshot for Sprint 14. Small choices add up to big momentum.</p>
+              </div>
+              <div className="intro-orbit" aria-hidden="true"><div className="orbit-ring orbit-ring-one"/><div className="orbit-ring orbit-ring-two"/><div className="orbit-core">₹<span>↗</span></div><i className="orbit-star star-one">✦</i><i className="orbit-star star-two">✳</i><div className="orbit-label">FINANCIAL<br/>MOMENTUM</div></div>
+              <div className="intro-index"><span>01 / OVERVIEW</span><span>OCT — NOV 2026</span></div>
+            </section>
             
             {/* TOP METRIC CARDS */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -265,7 +326,7 @@ function App() {
                 <div className="flex items-center justify-between mb-6">
                   <div>
                     <h3 className="text-lg font-bold text-white">Sprint Burndown Trend</h3>
-                    <p className="text-xs text-slate-400">Comparing ideal budget slope vs. actual student spending</p>
+                    <p className="text-xs text-slate-400">Planned remaining budget vs. your actual sprint spend</p>
                   </div>
                   <button onClick={() => setActiveTab('sprints')} className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center space-x-1">
                     <span>View Sprint Board</span>
@@ -274,14 +335,14 @@ function App() {
                 </div>
                 <div className="h-72 w-full">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={BURNDOWN_DATA}>
+                    <LineChart data={burndownData}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                       <XAxis dataKey="day" stroke="#64748b" fontSize={12} />
                       <YAxis stroke="#64748b" fontSize={12} />
                       <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '0.75rem' }} />
                       <Legend />
-                      <Line type="monotone" dataKey="ideal" stroke="#6366f1" strokeWidth={2} name="Ideal Budget (₹)" dot={false} />
-                      <Line type="monotone" dataKey="actual" stroke="#ec4899" strokeWidth={3} name="Actual Spent (₹)" />
+                      <Line type="monotone" dataKey="ideal" stroke="#6366f1" strokeWidth={2} name="Ideal Budget Remaining (₹)" dot={false} />
+                      <Line type="monotone" dataKey="actual" stroke="#ec4899" strokeWidth={3} name="Actual Budget Remaining (₹)" />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
@@ -525,16 +586,38 @@ function App() {
 
       </main>
 
+      {/* SPRINT CHECK-IN ON EACH APP OPEN */}
+      {isSprintSetupOpen && (
+        <div className="fixed inset-0 z-50 sprint-setup-backdrop">
+          <section className="sprint-setup-card" role="dialog" aria-modal="true" aria-labelledby="sprint-setup-title">
+            <div className="sprint-setup-mark">₹<span>↗</span></div>
+            <div className="sprint-setup-kicker">SPRINT 14 · QUICK CHECK-IN</div>
+            <h2 id="sprint-setup-title">Where are you<br/><em>starting today?</em></h2>
+            <p>Update your current spend and sprint budget to refresh your dashboard.</p>
+            <form onSubmit={handleSprintSetup}>
+              <label>Spent so far <span>₹</span><input type="number" min="0" step="1" value={sprintSetup.spent} onChange={e => setSprintSetup({ ...sprintSetup, spent: e.target.value })} required /></label>
+              <label>Sprint budget <span>₹</span><input type="number" min="1" step="1" value={sprintSetup.budget} onChange={e => setSprintSetup({ ...sprintSetup, budget: e.target.value })} required /></label>
+              <button type="submit">Update my dashboard <ArrowUpRight size={17}/></button>
+            </form>
+            <div className="sprint-setup-foot"><span className="sprint-setup-live"/> Figures can be changed again next time you open SprintSpend</div>
+          </section>
+        </div>
+      )}
+
       {/* ADD TRANSACTION MODAL */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl animate-scaleUp">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-bold text-white">Add New Ledger Record</h3>
-              <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-white">✕</button>
+        <div className="ledger-modal-backdrop fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="ledger-modal bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl animate-scaleUp">
+            <div className="ledger-modal-header">
+              <div>
+                <p className="ledger-modal-eyebrow">TRANSACTION DETAILS</p>
+                <h3 className="ledger-modal-title">Add New <span>Ledger Record</span></h3>
+                <p className="ledger-modal-description">Record income or an expense in your active sprint.</p>
+              </div>
+              <button onClick={() => setIsModalOpen(false)} className="ledger-modal-close" aria-label="Close transaction form">✕</button>
             </div>
             
-            <form onSubmit={handleAddTransaction} className="space-y-4">
+            <form onSubmit={handleAddTransaction} className="ledger-modal-form space-y-4">
               <div>
                 <label className="block text-xs font-mono text-slate-400 uppercase mb-1">Title / Description</label>
                 <input 
@@ -588,7 +671,7 @@ function App() {
                 </select>
               </div>
 
-              <div className="flex justify-end space-x-3 pt-4">
+              <div className="ledger-modal-actions flex justify-end space-x-3 pt-4">
                 <button 
                   type="button" 
                   onClick={() => setIsModalOpen(false)}
